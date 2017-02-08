@@ -131,7 +131,7 @@ type Conn struct {
 
 	streams *streams.IDGenerator
 	mu      sync.RWMutex
-	calls   map[int]*callReq
+	calls   map[int]callReq
 
 	errorHandler    ConnErrorHandler
 	compressor      Compressor
@@ -191,7 +191,7 @@ func Connect(host *HostInfo, cfg *ConnConfig, errorHandler ConnErrorHandler, ses
 		conn:         conn,
 		r:            bufio.NewReader(conn),
 		cfg:          cfg,
-		calls:        make(map[int]*callReq),
+		calls:        make(map[int]callReq),
 		timeout:      cfg.Timeout,
 		version:      uint8(cfg.ProtoVersion),
 		addr:         conn.RemoteAddr().String(),
@@ -499,7 +499,7 @@ func (c *Conn) recv() error {
 	c.mu.RLock()
 	call, ok := c.calls[head.stream]
 	c.mu.RUnlock()
-	if call == nil || call.framer == nil || !ok {
+	if !ok || call.framer == nil {
 		Logger.Printf("gocql: received response for stream which has no handler: header=%v\n", head)
 		return c.discardFrame(head)
 	}
@@ -527,10 +527,10 @@ func (c *Conn) recv() error {
 
 func (c *Conn) releaseStream(stream int) {
 	c.mu.Lock()
-	call := c.calls[stream]
-	if call != nil && stream != call.streamID {
-		panic(fmt.Sprintf("attempt to release streamID with ivalid stream: %d -> %+v\n", stream, call))
-	} else if call == nil {
+	call, ok := c.calls[stream]
+	if ok && stream != call.streamID {
+		panic(fmt.Sprintf("attempt to release streamID with invalid stream: %d -> %+v\n", stream, call))
+	} else if !ok {
 		panic(fmt.Sprintf("releasing a stream not in use: %d", stream))
 	}
 	delete(c.calls, stream)
@@ -553,7 +553,7 @@ func (c *Conn) handleTimeout() {
 var (
 	streamPool = sync.Pool{
 		New: func() interface{} {
-			return &callReq{
+			return callReq{
 				resp: make(chan error),
 			}
 		},
@@ -581,13 +581,12 @@ func (c *Conn) exec(ctx context.Context, req frameWriter, tracer Tracer) (*frame
 	framer := newFramer(c, c, c.compressor, c.version)
 
 	c.mu.Lock()
-	call := c.calls[stream]
-	if call != nil {
+	call, ok := c.calls[stream]
+	if ok {
 		c.mu.Unlock()
 		return nil, fmt.Errorf("attempting to use stream already in use: %d -> %d", stream, call.streamID)
-	} else {
-		call = streamPool.Get().(*callReq)
 	}
+	call = streamPool.Get().(callReq)
 	c.calls[stream] = call
 	c.mu.Unlock()
 
